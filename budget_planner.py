@@ -1,5 +1,5 @@
 import streamlit as st
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 import json, os, requests
 from collections import defaultdict
 
@@ -18,7 +18,8 @@ def load_data():
         "expenses_history": [],
         "income_history": [],
         "saved_amounts": {},
-        "deadlines": {}
+        "deadlines": {},
+        "chat_history": []
     }
 
 def save_data(data):
@@ -38,14 +39,12 @@ for cat_name, deadline_str in list(saved.get("deadlines", {}).items()):
     if deadline_str:
         deadline = datetime.strptime(deadline_str, "%Y-%m-%d").date()
         if deadline <= today:
-            old_amount = saved["saved_amounts"].get(cat_name, 0)
-            if old_amount > 0:
+            if saved["saved_amounts"].get(cat_name, 0) > 0:
                 saved["saved_amounts"][cat_name] = 0
                 changed = True
                 month = today.month + 1 if today.month < 12 else 1
                 year = today.year if today.month < 12 else today.year + 1
                 saved["deadlines"][cat_name] = date(year, month, 1).strftime("%Y-%m-%d")
-
 if changed:
     save_data(saved)
 
@@ -54,7 +53,7 @@ def ask_ollama(prompt):
     try:
         resp = requests.post(OLLAMA_URL, json={
             "model": OLLAMA_MODEL, "prompt": prompt,
-            "stream": False, "options": {"temperature": 0.1, "max_tokens": 400}
+            "stream": False, "options": {"temperature": 0.3, "max_tokens": 500}
         }, timeout=60)
         return resp.json()["response"].strip()
     except:
@@ -62,11 +61,10 @@ def ask_ollama(prompt):
 
 def ai_categorize(raw_text, categories):
     cat_names = [c["name"] for c in categories] + ["Другое"]
-    cat_list = ", ".join(cat_names)
     prompt = f"""Ты — финансовый ассистент. Верни ТОЛЬКО JSON.
 Трата: "{raw_text}"
 Формат: {{"category": "категория", "amount": число, "comment": "комментарий"}}
-Категории: {cat_list}.
+Категории: {', '.join(cat_names)}.
 Если сумма не указана — 0."""
     response = ask_ollama(prompt)
     try:
@@ -83,8 +81,8 @@ def ai_distribute(income, categories, saved_amounts):
         f"- {c['name']}: лимит {c['limit']}р, отложено {saved_amounts.get(c['name'], 0)}р, обязательная: {c.get('mandatory', False)}"
         for c in categories
     ])
-    prompt = f"""Ты — финансовый ассистент. Распредели поступление {income}р по статьям.
-Правила: не больше 50% от недостающей суммы на каждую статью. Обязательные статьи — в первую очередь.
+    prompt = f"""Ты — финансовый ассистент. Распредели поступление {income}р.
+Правила: не больше 50% от недостающей суммы. Обязательные — в первую очередь.
 Верни ТОЛЬКО JSON: {{"распределение": [{{"статья": "название", "сумма": число, "причина": "почему"}}], "остаток": число, "совет": "общий совет"}}
 Статьи:
 {items_text}"""
@@ -103,33 +101,29 @@ def ai_analyze_full(expenses_data):
         return "Нет данных."
     stats = "\n".join([f"- {cat}: {total:.0f}р ({count} оп.)" for cat, total, count in expenses_data])
     total = sum(t for _, t, _ in expenses_data)
-    prompt = f"""Проанализируй ВСЕ траты за всё время:
+    return ask_ollama(f"""Проанализируй ВСЕ траты за всё время:
 {stats}
 Всего: {total:.0f}р
-Дай анализ (5-7 предложений): тренды, тревожные сигналы, где экономить, конкретные советы."""
-    return ask_ollama(prompt)
+Дай анализ (5-7 предложений): тренды, тревожные сигналы, где экономить, конкретные советы.""")
 
 def ai_forecast_full(income, spending, goal_name, goal_amount):
     savings = income - spending
     months = goal_amount / savings if savings > 0 else 999
-    prompt = f"""Сделай прогноз накоплений:
+    return ask_ollama(f"""Сделай прогноз накоплений:
 Доход: {income:.0f}р/мес, Траты: {spending:.0f}р/мес, Откладываем: {savings:.0f}р/мес.
 Цель: {goal_name} — {goal_amount:.0f}р, Накопим через: {months:.1f} мес.
-Дай совет (2-3 предложения): реально ли достичь цели? Что изменить?"""
-    return ask_ollama(prompt)
+Дай совет (2-3 предложения): реально ли достичь цели? Что изменить?""")
 
 # ========== ИНТЕРФЕЙС ==========
 st.title("💰 AI-Планировщик бюджета")
 
-# ========== ТЕКУЩИЕ СУММЫ С РУЧНЫМ ВВОДОМ ==========
+# ========== ТЕКУЩИЕ СУММЫ ==========
 if saved["categories"]:
-    st.header("💳 Текущие суммы по категориям")
-    
+    st.header("💳 Текущие суммы")
     for i, cat in enumerate(saved["categories"]):
         current = saved["saved_amounts"].get(cat["name"], 0)
         limit = cat["limit"]
         progress = min(current / limit, 1.0) if limit > 0 else 0
-        remaining = max(limit - current, 0)
         
         col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
         with col1:
@@ -138,153 +132,176 @@ if saved["categories"]:
         with col2:
             st.write(f"**{current:.0f}р** из {limit}р")
         with col3:
-            # Кнопка добавления
-            add_amount = st.number_input(f"➕ Добавить", min_value=0, step=100, key=f"add_{i}")
+            add = st.number_input(f"➕", min_value=0, step=100, key=f"add_{i}")
         with col4:
-            # Кнопка списания
-            subtract_amount = st.number_input(f"➖ Списать", min_value=0, step=100, key=f"sub_{i}")
+            sub = st.number_input(f"➖", min_value=0, step=100, key=f"sub_{i}")
         
-        col_btn1, col_btn2 = st.columns(2)
-        with col_btn1:
-            if st.button(f"✅ Применить +{add_amount}р", key=f"apply_add_{i}"):
-                saved["saved_amounts"][cat["name"]] = saved["saved_amounts"].get(cat["name"], 0) + add_amount
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button(f"✅ +{add}р", key=f"btn_add_{i}"):
+                saved["saved_amounts"][cat["name"]] = saved["saved_amounts"].get(cat["name"], 0) + add
                 save_data(saved)
                 st.rerun()
-        with col_btn2:
-            if st.button(f"❌ Списать {subtract_amount}р", key=f"apply_sub_{i}"):
-                new_val = max(0, saved["saved_amounts"].get(cat["name"], 0) - subtract_amount)
-                saved["saved_amounts"][cat["name"]] = new_val
+        with c2:
+            if st.button(f"❌ -{sub}р", key=f"btn_sub_{i}"):
+                saved["saved_amounts"][cat["name"]] = max(0, saved["saved_amounts"].get(cat["name"], 0) - sub)
                 save_data(saved)
                 st.rerun()
-    
     st.divider()
 
-# ========== УПРАВЛЕНИЕ КАТЕГОРИЯМИ ==========
-st.sidebar.header("📋 Мои категории")
-
-with st.sidebar.expander("➕ Новая категория"):
-    new_name = st.text_input("Название", key="new_cat_name")
-    new_limit = st.number_input("Лимит на месяц", min_value=0, step=500, key="new_cat_limit")
-    new_mandatory = st.checkbox("Обязательная?", key="new_cat_mandatory")
-    new_deadline = st.date_input("Дедлайн (опционально)", value=None, key="new_cat_deadline")
-    if st.button("💾 Добавить категорию") and new_name:
+# ========== КАТЕГОРИИ ==========
+st.sidebar.header("📋 Категории")
+with st.sidebar.expander("➕ Новая"):
+    name = st.text_input("Название", key="new_name")
+    limit = st.number_input("Лимит", min_value=0, step=500, key="new_limit")
+    mandatory = st.checkbox("Обязательная?", key="new_mandatory")
+    deadline = st.date_input("Дедлайн", value=None, key="new_deadline")
+    if st.button("💾 Добавить") and name:
         saved["categories"].append({
-            "name": new_name,
-            "limit": new_limit,
-            "mandatory": new_mandatory,
-            "deadline": new_deadline.strftime("%Y-%m-%d") if new_deadline else None
+            "name": name, "limit": limit, "mandatory": mandatory,
+            "deadline": deadline.strftime("%Y-%m-%d") if deadline else None
         })
-        if new_name not in saved["saved_amounts"]:
-            saved["saved_amounts"][new_name] = 0
-        if new_deadline:
-            saved["deadlines"][new_name] = new_deadline.strftime("%Y-%m-%d")
+        if name not in saved["saved_amounts"]:
+            saved["saved_amounts"][name] = 0
+        if deadline:
+            saved["deadlines"][name] = deadline.strftime("%Y-%m-%d")
         save_data(saved)
-        st.success(f"✅ {new_name} добавлена!")
+        st.success(f"✅ {name}")
         st.rerun()
 
 if saved["categories"]:
-    st.sidebar.write("**Текущие категории:**")
-    for i, cat in enumerate(saved["categories"]):
-        mandatory_label = " 🔒" if cat.get("mandatory") else ""
-        deadline_str = f" (дедлайн: {cat.get('deadline', '')})" if cat.get("deadline") else ""
-        st.sidebar.write(f"{cat['name']}{mandatory_label}: {cat['limit']}р{deadline_str}")
-        if st.sidebar.button(f"🗑️ Удалить {cat['name']}", key=f"del_{i}"):
+    st.sidebar.write("**Категории:**")
+    for i, c in enumerate(saved["categories"]):
+        st.sidebar.write(f"{c['name']}: {c['limit']}р")
+        if st.sidebar.button(f"🗑️ {c['name']}", key=f"del_{i}"):
             saved["categories"].pop(i)
             save_data(saved)
             st.rerun()
-else:
-    st.sidebar.write("Пока нет категорий.")
 
-# ========== ПОСТУПЛЕНИЕ + AI-РАСПРЕДЕЛЕНИЕ ==========
-st.header("💵 Поступление денег")
-income = st.number_input("Сколько пришло?", value=25000, min_value=0, step=500)
-if st.button("🤖 AI-распределить (лимит 50%)") and income > 0 and saved["categories"]:
-    with st.spinner("AI распределяет..."):
+# ========== ПОСТУПЛЕНИЕ ==========
+st.header("💵 Поступление")
+income = st.number_input("Сумма", value=25000, min_value=0, step=500)
+if st.button("🤖 AI-распределить") and income > 0 and saved["categories"]:
+    with st.spinner("AI думает..."):
         result = ai_distribute(income, saved["categories"], saved["saved_amounts"])
-        st.subheader("📊 Результат распределения")
-        for dist in result.get("распределение", []):
-            st.write(f"✅ {dist['статья']}: {dist['сумма']}р — {dist['причина']}")
-            saved["saved_amounts"][dist['статья']] = saved["saved_amounts"].get(dist['статья'], 0) + dist['сумма']
-        st.metric("💰 Остаток (подушка)", f"{result.get('остаток', 0)}р")
-        st.info(f"💬 {result.get('совет', '')}")
-        saved["income_history"].append({
-            "date": today.strftime("%Y-%m-%d"),
-            "amount": income,
-            "distribution": result
-        })
+        for d in result.get("распределение", []):
+            st.write(f"✅ {d['статья']}: {d['сумма']}р — {d['причина']}")
+            saved["saved_amounts"][d['статья']] = saved["saved_amounts"].get(d['статья'], 0) + d['сумма']
+        st.metric("💰 Остаток", f"{result.get('остаток', 0)}р")
+        st.info(result.get('совет', ''))
+        saved["income_history"].append({"date": today.strftime("%Y-%m-%d"), "amount": income, "distribution": result})
         save_data(saved)
 
-# ========== РУЧНОЕ ДОБАВЛЕНИЕ ТРАТЫ ==========
-st.header("➕ Добавить трату")
+# ========== ТРАТА ==========
+st.header("➕ Трата")
 if saved["categories"]:
-    cat_names = [c["name"] for c in saved["categories"]] + ["Другое"]
-    col1, col2 = st.columns(2)
-    with col1:
-        manual_cat = st.selectbox("Категория", cat_names)
-    with col2:
-        manual_amount = st.number_input("Сумма", min_value=0, step=100, key="manual_amount")
-    manual_comment = st.text_input("Комментарий (необязательно)", key="manual_comment")
-    if st.button("💾 Добавить трату"):
-        saved["expenses_history"].append({
-            "date": today.strftime("%Y-%m-%d"),
-            "category": manual_cat,
-            "amount": manual_amount,
-            "comment": manual_comment
-        })
+    cats = [c["name"] for c in saved["categories"]] + ["Другое"]
+    c1, c2 = st.columns(2)
+    with c1:
+        cat = st.selectbox("Категория", cats)
+    with c2:
+        amt = st.number_input("Сумма", min_value=0, step=100, key="man_amt")
+    if st.button("💾 Добавить"):
+        saved["expenses_history"].append({"date": today.strftime("%Y-%m-%d"), "category": cat, "amount": amt})
         save_data(saved)
-        st.success(f"✅ Добавлено: {manual_cat} — {manual_amount}р")
+        st.success(f"✅ {cat} — {amt}р")
 
 # ========== AI-КАТЕГОРИЗАТОР ==========
 if saved["categories"]:
-    st.header("🤖 AI-категоризатор трат")
-    raw = st.text_input("Опиши трату (например: 'Пятёрочка 1500 рублей')")
-    if st.button("🔍 Распознать и добавить", key="ai_add") and raw:
-        with st.spinner("AI думает..."):
-            result = ai_categorize(raw, saved["categories"])
-        st.success(f"✅ {result['category']} — {result['amount']}р")
-        saved["expenses_history"].append({
-            "date": today.strftime("%Y-%m-%d"),
-            "raw": raw,
-            "category": result["category"],
-            "amount": result["amount"]
-        })
+    st.header("🤖 AI-категоризатор")
+    raw = st.text_input("Опиши трату")
+    if st.button("🔍 Распознать") and raw:
+        with st.spinner("..."):
+            r = ai_categorize(raw, saved["categories"])
+        st.success(f"✅ {r['category']} — {r['amount']}р")
+        saved["expenses_history"].append({"date": today.strftime("%Y-%m-%d"), "raw": raw, "category": r["category"], "amount": r["amount"]})
         save_data(saved)
 
 # ========== AI-АНАЛИЗ ==========
-st.header("📊 AI-Анализ всех трат")
-if st.button("🤖 Анализировать всё время"):
-    with st.spinner("AI анализирует..."):
+st.header("📊 AI-Анализ")
+if st.button("🤖 Анализировать"):
+    with st.spinner("..."):
         expenses = saved.get("expenses_history", [])
         if expenses:
             cat_data = defaultdict(lambda: [0, 0])
             for e in expenses:
                 cat_data[e["category"]][0] += e.get("amount", 0)
                 cat_data[e["category"]][1] += 1
-            grouped = [(cat, data[0], data[1]) for cat, data in cat_data.items()]
+            grouped = [(cat, d[0], d[1]) for cat, d in cat_data.items()]
             grouped.sort(key=lambda x: x[1], reverse=True)
             st.write(ai_analyze_full(grouped))
         else:
             st.warning("Нет данных.")
 
 # ========== AI-ПРОГНОЗ ==========
-st.header("🎯 AI-Прогноз накоплений")
-goal_name = st.text_input("Цель", value="Шри-Ланка")
-goal_amount = st.number_input("Сумма цели", value=150000, min_value=0, step=10000)
-monthly_income = st.number_input("Доход в месяц", value=150000, min_value=0, step=5000)
-if st.button("🤖 Спрогнозировать"):
-    with st.spinner("AI считает..."):
+st.header("🎯 AI-Прогноз")
+goal = st.text_input("Цель", value="Шри-Ланка")
+goal_amt = st.number_input("Сумма цели", value=150000, min_value=0, step=10000)
+inc = st.number_input("Доход/мес", value=150000, min_value=0, step=5000)
+if st.button("🤖 Прогноз"):
+    with st.spinner("..."):
         expenses = saved.get("expenses_history", [])
-        current_month = today.strftime("%Y-%m")
-        monthly_spending = sum(e.get("amount", 0) for e in expenses if e["date"].startswith(current_month))
-        st.write(ai_forecast_full(monthly_income, monthly_spending, goal_name, goal_amount))
-        savings = monthly_income - monthly_spending
-        months = goal_amount / savings if savings > 0 else 999
-        st.metric("💰 Откладываем в месяц", f"{savings:.0f}р")
-        st.metric("📅 Накопим через", f"{months:.1f} мес.")
+        cm = today.strftime("%Y-%m")
+        sp = sum(e.get("amount", 0) for e in expenses if e["date"].startswith(cm))
+        st.write(ai_forecast_full(inc, sp, goal, goal_amt))
+        sv = inc - sp
+        mo = goal_amt / sv if sv > 0 else 999
+        st.metric("💰 Откладываем", f"{sv:.0f}р")
+        st.metric("📅 Накопим через", f"{mo:.1f} мес.")
 
 # ========== ИСТОРИЯ ==========
 st.header("📜 История трат")
-expenses = saved.get("expenses_history", [])
-if expenses:
-    for e in expenses[-10:]:
-        st.write(f"📅 {e['date']} — {e['category']}: {e.get('amount', 0)}р")
+for e in saved.get("expenses_history", [])[-10:]:
+    st.write(f"📅 {e['date']} — {e['category']}: {e.get('amount', 0)}р")
+
+# ========== ЧАТ С AI ==========
+st.divider()
+st.header("💬 Чат с AI-ассистентом")
+st.write("Спрашивай о финансах: как экономить, куда распределить, анализ трат.")
+
+# История чата
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []
+
+# Показываем историю
+for msg in st.session_state.chat_messages[-10:]:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+
+# Поле ввода
+user_msg = st.chat_input("Твой вопрос...")
+if user_msg:
+    st.session_state.chat_messages.append({"role": "user", "content": user_msg})
+    
+    context = ""
+    if saved["categories"]:
+        context += "Категории:\n"
+        for c in saved["categories"]:
+            current = saved["saved_amounts"].get(c["name"], 0)
+            context += f"- {c['name']}: лимит {c['limit']}р, отложено {current}р\n"
+    
+    expenses = saved.get("expenses_history", [])
+    if expenses:
+        cm = today.strftime("%Y-%m")
+        month_total = sum(e.get("amount", 0) for e in expenses if e["date"].startswith(cm))
+        context += f"\nТраты за месяц: {month_total:.0f}р\n"
+    
+    income_hist = saved.get("income_history", [])
+    if income_hist:
+        last_income = income_hist[-1]["amount"]
+        context += f"Последнее поступление: {last_income}р\n"
+    
+    prompt = f"""Ты — личный финансовый ассистент. У тебя есть доступ к данным пользователя.
+
+ДАННЫЕ ПОЛЬЗОВАТЕЛЯ:
+{context}
+
+ВОПРОС: {user_msg}
+
+Отвечай полезно, конкретно, ссылаясь на данные. Если данных не хватает — спроси."""
+    
+    with st.spinner("AI думает..."):
+        response = ask_ollama(prompt)
+    
+    st.session_state.chat_messages.append({"role": "assistant", "content": response})
+    st.rerun()
