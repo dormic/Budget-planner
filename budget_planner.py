@@ -121,23 +121,42 @@ def ai_forecast_full(income, spending, goal_name, goal_amount):
 # ========== ИНТЕРФЕЙС ==========
 st.title("💰 AI-Планировщик бюджета")
 
-# ========== ТЕКУЩИЕ СУММЫ (ГЛАВНАЯ СТРАНИЦА) ==========
+# ========== ТЕКУЩИЕ СУММЫ С РУЧНЫМ ВВОДОМ ==========
 if saved["categories"]:
     st.header("💳 Текущие суммы по категориям")
-    cols = st.columns(min(len(saved["categories"]), 4))
+    
     for i, cat in enumerate(saved["categories"]):
         current = saved["saved_amounts"].get(cat["name"], 0)
         limit = cat["limit"]
         progress = min(current / limit, 1.0) if limit > 0 else 0
         remaining = max(limit - current, 0)
         
-        with cols[i % len(cols)]:
-            st.metric(
-                label=f"{cat['name']} {'🔒' if cat.get('mandatory') else ''}",
-                value=f"{current:.0f}р",
-                delta=f"Осталось {remaining:.0f}р"
-            )
+        col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+        with col1:
+            st.write(f"{cat['name']} {'🔒' if cat.get('mandatory') else ''}")
             st.progress(progress)
+        with col2:
+            st.write(f"**{current:.0f}р** из {limit}р")
+        with col3:
+            # Кнопка добавления
+            add_amount = st.number_input(f"➕ Добавить", min_value=0, step=100, key=f"add_{i}")
+        with col4:
+            # Кнопка списания
+            subtract_amount = st.number_input(f"➖ Списать", min_value=0, step=100, key=f"sub_{i}")
+        
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button(f"✅ Применить +{add_amount}р", key=f"apply_add_{i}"):
+                saved["saved_amounts"][cat["name"]] = saved["saved_amounts"].get(cat["name"], 0) + add_amount
+                save_data(saved)
+                st.rerun()
+        with col_btn2:
+            if st.button(f"❌ Списать {subtract_amount}р", key=f"apply_sub_{i}"):
+                new_val = max(0, saved["saved_amounts"].get(cat["name"], 0) - subtract_amount)
+                saved["saved_amounts"][cat["name"]] = new_val
+                save_data(saved)
+                st.rerun()
+    
     st.divider()
 
 # ========== УПРАВЛЕНИЕ КАТЕГОРИЯМИ ==========
