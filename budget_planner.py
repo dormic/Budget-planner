@@ -42,7 +42,6 @@ for cat_name, deadline_str in list(saved.get("deadlines", {}).items()):
             if old_amount > 0:
                 saved["saved_amounts"][cat_name] = 0
                 changed = True
-                # Переносим дедлайн на следующий месяц
                 month = today.month + 1 if today.month < 12 else 1
                 year = today.year if today.month < 12 else today.year + 1
                 saved["deadlines"][cat_name] = date(year, month, 1).strftime("%Y-%m-%d")
@@ -121,6 +120,25 @@ def ai_forecast_full(income, spending, goal_name, goal_amount):
 
 # ========== ИНТЕРФЕЙС ==========
 st.title("💰 AI-Планировщик бюджета")
+
+# ========== ТЕКУЩИЕ СУММЫ (ГЛАВНАЯ СТРАНИЦА) ==========
+if saved["categories"]:
+    st.header("💳 Текущие суммы по категориям")
+    cols = st.columns(min(len(saved["categories"]), 4))
+    for i, cat in enumerate(saved["categories"]):
+        current = saved["saved_amounts"].get(cat["name"], 0)
+        limit = cat["limit"]
+        progress = min(current / limit, 1.0) if limit > 0 else 0
+        remaining = max(limit - current, 0)
+        
+        with cols[i % len(cols)]:
+            st.metric(
+                label=f"{cat['name']} {'🔒' if cat.get('mandatory') else ''}",
+                value=f"{current:.0f}р",
+                delta=f"Осталось {remaining:.0f}р"
+            )
+            st.progress(progress)
+    st.divider()
 
 # ========== УПРАВЛЕНИЕ КАТЕГОРИЯМИ ==========
 st.sidebar.header("📋 Мои категории")
